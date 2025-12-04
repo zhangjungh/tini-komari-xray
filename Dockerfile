@@ -1,48 +1,47 @@
-# 使用多阶段方式更清晰（可选），但这里用单阶段
 FROM debian:bookworm-slim
 
-# 安装基础工具（用于后续判断架构和下载）
+# 安装运行时依赖（tini, ca-certificates, jq）
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        tini curl ca-certificates jq wget \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends tini ca-certificates jq && \
+    rm -rf /var/lib/apt/lists/*
 
-# 安装 dpkg（用于获取目标架构）
+# 安装构建时依赖（仅用于下载，后续可清理）
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends dpkg \
-    && rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends curl unzip && \
+    rm -rf /var/lib/apt/lists/*
 
-# 根据目标系统架构下载 xray-core
+# === 下载 xray-core（根据 TARGETPLATFORM 自动选择架构）===
+# 注意：TARGETPLATFORM 是 BuildKit 自动设置的，如 "linux/amd64"
 ENV XRAY_VERSION=25.12.2
-RUN ARCH=$(dpkg --print-architecture); \
-    if [ "$ARCH" = "amd64" ]; then \
-        XRAY_ARCH="64"; \
-    elif [ "$ARCH" = "arm64" ]; then \
-        XRAY_ARCH="arm64-v8a"; \
-    else \
-        echo "Unsupported architecture: $ARCH" >&2; exit 1; \
-    fi; \
-    echo "Building for architecture: $ARCH (Xray arch: $XRAY_ARCH)"; \
-    curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${XRAY_ARCH}.zip" && \
+RUN case "$TARGETPLATFORM" in \
+        "linux/amd64")   ARCH="64" ;; \
+        "linux/arm64")   ARCH="arm64-v8a" ;; \
+        *) echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
+    esac && \
+    echo "Downloading Xray for $TARGETPLATFORM -> arch: $ARCH" && \
+    curl -L -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-${ARCH}.zip" && \
     unzip xray.zip && \
-    mv xray /usr/local/bin/ && \
+    mv xray /usr/local/bin/xray && \
     chmod +x /usr/local/bin/xray && \
     rm xray.zip
 
-# 下载 komari-agent
-RUN ARCH=$(dpkg --print-architecture); \
-    if [ "$ARCH" = "amd64" ]; then \
-        KOMARI_ARCH="linux-amd64"; \
-    elif [ "$ARCH" = "arm64" ]; then \
-        KOMARI_ARCH="linux-arm64"; \
-    else \
-        echo "Unsupported architecture: $ARCH" >&2; exit 1; \
-    fi; \
-    echo "Downloading komari-agent for: $KOMARI_ARCH"; \
-    curl -L -o /usr/local/bin/komari-agent "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-${KOMARI_ARCH}" && \
+# === 下载 komari-agent ===
+RUN case "$TARGETPLATFORM" in \
+        "linux/amd64")   ARCH="linux-amd64" ;; \
+        "linux/arm64")   ARCH="linux-arm64" ;; \
+        *) echo "Unsupported platform: $TARGETPLATFORM" >&2; exit 1 ;; \
+    esac && \
+    echo "Downloading komari-agent for $TARGETPLATFORM -> $ARCH" && \
+    curl -L -o /usr/local/bin/komari-agent "https://github.com/komari-monitor/komari-agent/releases/latest/download/komari-agent-${ARCH}" && \
     chmod +x /usr/local/bin/komari-agent
 
-# 复制启动脚本和配置
+# 清理构建依赖（减小镜像体积）
+RUN apt-get update && \
+    apt-get purge -y --auto-remove curl unzip && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 复制应用文件
 COPY start.sh /start.sh
 COPY xray-config.example.json /etc/xray/config.example.json
 RUN chmod +x /start.sh
